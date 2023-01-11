@@ -81,10 +81,10 @@ class Decoder(DecoderArchetype):
         self.data_current_command_bytes_remaining = 0
         
         
-    def switch_state(self, newState, firstOfNew):
-        self.put(self.start_of_current_state, firstOfNew, self.out_ann,
+    def switch_state(self, newState, first_of_new):
+        self.put(self.start_of_current_state, first_of_new, self.out_ann,
                  [AnnotationType.STATE, [f"State: {self.state.name}"]])
-        self.start_of_current_state = firstOfNew
+        self.start_of_current_state = first_of_new
         self.state = newState
         
     def handle_starting_byte(self, b, s, e):
@@ -182,6 +182,9 @@ class Decoder(DecoderArchetype):
     def put_command(self, *desc):
         self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
                  [AnnotationType.COMMAND, [*desc]])
+    def put_error(self, *desc):
+        self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
+                 [AnnotationType.ERROR, [*desc]])
     
     def handle_unknown_command(self, data):
         bindump = ' '.join(('0' if x < 0x10 else '') + hex(x)[2:] for x in data)
@@ -248,6 +251,16 @@ class Decoder(DecoderArchetype):
     def handle_command_91(self, data):
         self.handle_unknown_command(data)
         
+    def decode_text_or_error(self, byte_text, encoding):
+        if type(byte_text) is not bytes:
+            byte_text = bytes(byte_text)
+        try:
+            return byte_text.decode(encoding)
+        except:
+            self.put_error("Text decoding error")
+            return byte_text.decode(encoding, errors='ignore')
+
+        
     @display_command_constlen(opcodes = range(0xE0, 0xE5), length = 0x04)
     def handle_text_command(self, data):
         # Doesn't work sometimes - text length is miscalculated.
@@ -260,5 +273,51 @@ class Decoder(DecoderArchetype):
             # What col and row are in reality is unknown
             col = data[0] & 0b1111
             row = int(math.log(data[1], 2))
-            text = ''.join(chr(x) for x in data[4:])
-            self.put_command(f"Write '{text}' in ?{row=}, ?{col=}", f"'{text}'")
+            encoding = data[3]
+            encoding_map = {
+                0x05: 'latin1',
+                0x84: 'utf16-be',
+                0x90: 'sjis',
+            }
+            special_sjis_sequences = {
+                0xFD: {
+                    **dict((0x65 + x, f"big {x}") for x in range(10))
+                },
+                0xFA: {
+                    0x55: 'big :'
+                },
+            }
+            
+            if encoding not in encoding_map:
+                self.put_error(f"Unknown encoding: {hex(encoding)}")
+                encoding = 0x05
+            
+            text_bytes = bytes(data[4:])
+            temp_bytes = []
+            output_text = ""
+            first_seq_byte = None
+            for byte in text_bytes:
+                if first_seq_byte is None:
+                    if byte in special_sjis_sequences:
+                        first_seq_byte = byte
+                        continue
+                    temp_bytes.append(byte)
+                else:
+                    output_text += self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+                    temp_bytes = []
+                    
+                    namespace = special_sjis_sequences[first_seq_byte]
+                    if byte not in namespace:
+                        sequence_name = f"{hex(first_seq_byte)[2:]}{hex(byte)[2:]}"
+                        self.put_error(f"unknown char in {hex(first_seq_byte)} namespace - {hex(byte)}")
+                    else:
+                        sequence_name = namespace[byte]
+                    output_text += f"<{sequence_name}>"
+                    first_seq_byte = None
+            output_text += self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+                
+            self.put_command(
+                f"Write '{output_text}' ({encoding_map[encoding]}) in ?{row=}, ?{col=}",
+                f"Write '{output_text}' in ?{row=}, ?{col=}",
+                f"'{output_text}'"
+            )
