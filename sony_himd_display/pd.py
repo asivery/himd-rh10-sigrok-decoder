@@ -2,6 +2,7 @@ from sigrokdecode import Decoder as DecoderArchetype, OUTPUT_ANN
 from enum import Enum
 from dataclasses import dataclass
 from typing import Callable
+import math
 
 @dataclass(frozen = True)
 class Command:
@@ -9,23 +10,28 @@ class Command:
     length: int
     handler: Callable[[any, bytes], None]
 
-def display_command_constlen(opcode, length):
+def display_command_constlen(*, opcode = None, opcodes = None, length):
     class class_level_decorator:
         def __init__(self, fn):
             self.fn = fn
         def __set_name__(self, owner, name):
-            owner.constant_length_commands[opcode] = Command(
-                opcode,
-                length,
-                self.fn
-            )
-            setattr(owner, name, self.fn)
+            all_opcodes = list(opcodes or [])
+            if opcode:
+                all_opcodes.append(opcode)
+            for op in all_opcodes:
+                owner.constant_length_commands[op] = Command(
+                    op,
+                    length,
+                    self.fn
+                )
+                print(f"[Command Definition]: Added handler for command {hex(op)} - {name}")
     return class_level_decorator
 
 class DecodingState(Enum):
-    IDLE = 0
-    PROLOGUE = 1
-    DATA = 2
+    IDLE, PROLOGUE, DATA = range(3)
+
+class AnnotationType():
+    STATE, DEBUG, ASCII, COMMAND, ERROR = range(5)
 
 class Decoder(DecoderArchetype):
     api_version = 3
@@ -43,12 +49,14 @@ class Decoder(DecoderArchetype):
         ('debug', 'Debug'),
         ('ascii', 'Ascii'),
         ('commands', 'Commands'),
+        ('errors', 'Errors'),
     )
     annotation_rows = (
-        ('state', 'States', (0,)),
-        ('debug', 'Debug', (1,)),
-        ('ascii', 'ASCII', (2,)),
-        ('commands', 'Commands', (3,)),
+        ('state', 'States', (AnnotationType.STATE,)),
+        ('debug', 'Debug', (AnnotationType.DEBUG,)),
+        ('ascii', 'ASCII', (AnnotationType.ASCII,)),
+        ('commands', 'Commands', (AnnotationType.COMMAND,)),
+        ('errors', 'Errors', (AnnotationType.ERROR,)),
     )
     constant_length_commands = {}
     
@@ -75,7 +83,7 @@ class Decoder(DecoderArchetype):
         
     def switch_state(self, newState, firstOfNew):
         self.put(self.start_of_current_state, firstOfNew, self.out_ann,
-                 [0, [f"State: {self.state.name}"]])
+                 [AnnotationType.STATE, [f"State: {self.state.name}"]])
         self.start_of_current_state = firstOfNew
         self.state = newState
         
@@ -105,9 +113,11 @@ class Decoder(DecoderArchetype):
         self.data_bytes_remaining -= 1
         if self.data_bytes_remaining == 0:
             if self.data_xor != 0xFF:
-                self.put(self.start_of_current_state, e, self.out_ann, [1, [f"Checksum mismatch!"]])
+                self.put(self.start_of_current_state, e, self.out_ann, [AnnotationType.ERROR, [f"Checksum mismatch! ({hex(self.data_xor)} != 0xFF)"]])
             if self.data_bytes_count > 10:
-                self.put(s, e, self.out_ann, [1, [f"Debug: Dense packet"]])
+                self.put(s, e, self.out_ann, [AnnotationType.DEBUG, [f"Debug: Dense packet"]])
+            if self.data_current_command_bytes_remaining != 0:
+                self.put(self.start_of_current_state, e, self.out_ann, [AnnotationType.ERROR, [f"Packet ended, but current command still has {self.data_current_command_bytes_remaining} bytes remaining!", f"-{self.data_current_command_bytes_remaining}"]])
             self.switch_state(DecodingState.IDLE, e)
             return
         if b:
@@ -148,7 +158,7 @@ class Decoder(DecoderArchetype):
         
         if value in range(ord(' '), ord('z')):
             self.put(start, end, self.out_ann,
-                     [2, [f"'{chr(value)}'"]])
+                     [AnnotationType.ASCII, [f"'{chr(value)}'"]])
         
         # Make sure the first sample of the current state is set correctly.
         if self.start_of_current_state is None:
@@ -171,7 +181,7 @@ class Decoder(DecoderArchetype):
         
     def put_command(self, *desc):
         self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
-                 [3, [*desc]])
+                 [AnnotationType.COMMAND, [*desc]])
     
     def handle_unknown_command(self, data):
         bindump = ' '.join(('0' if x < 0x10 else '') + hex(x)[2:] for x in data)
@@ -238,26 +248,17 @@ class Decoder(DecoderArchetype):
     def handle_command_91(self, data):
         self.handle_unknown_command(data)
         
-    @display_command_constlen(opcode = 0xE0, length = 0x04)
-    def handle_command_e0(self, data):
+    @display_command_constlen(opcodes = range(0xE0, 0xE5), length = 0x04)
+    def handle_text_command(self, data):
         # Doesn't work sometimes - text length is miscalculated.
         if len(data) == 4:
-            length = data[2] & 0b00001111
+            length = data[2] & 0b00011111
             self.data_current_command_bytes_remaining = length
             # The command isn't over!
             return True
         else:
+            # What col and row are in reality is unknown
+            col = data[0] & 0b1111
+            row = int(math.log(data[1], 2))
             text = ''.join(chr(x) for x in data[4:])
-            self.put_command(f"Continue previous message: '{text}'", f"-'{text}'")
-        
-    # Length = 0x04 required to read the real length parameter
-    @display_command_constlen(opcode = 0xE3, length = 0x04)
-    def handle_command_e3(self, data):
-        if len(data) == 4:
-            length = data[2] & 0b00001111
-            self.data_current_command_bytes_remaining = length
-            # The command isn't over!
-            return True
-        else:
-            text = ''.join(chr(x) for x in data[4:])
-            self.put_command(f"Write '{text}'{' (will continue in the next packet)' if text.endswith('-') else ''}", f"'{text}'")
+            self.put_command(f"Write '{text}' in ?{row=}, ?{col=}", f"'{text}'")
