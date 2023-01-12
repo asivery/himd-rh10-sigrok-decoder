@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Callable
 import math
 
+import requests
+import json
+
+TRANSMIT_ADDRESS = "http://localhost:36002"
+
 @dataclass(frozen = True)
 class Command:
     opcode: int
@@ -38,7 +43,7 @@ class Decoder(DecoderArchetype):
     id = 'sony_himd'
     name = "Sony MZ-RH10/RH910 Display"
     longname = "Sony MZ-RH10/RH910 Display"
-    desc = '';
+    desc = ''
     license = ''
     inputs = ['spi']
     outputs = ['sony_himd']
@@ -142,6 +147,7 @@ class Decoder(DecoderArchetype):
             elif b != 0:
                 self.data_current_command_start, self.data_current_command_end = s, e
                 self.put_command(f"Byte {hex(b)} - not a valid command", "?")
+                self.put_error(f"Byte {hex(b)} - not a valid command")
         
         # Command in progress...
         if self.data_current_command_bytes_remaining:
@@ -189,6 +195,10 @@ class Decoder(DecoderArchetype):
     def handle_unknown_command(self, data):
         bindump = ' '.join(('0' if x < 0x10 else '') + hex(x)[2:] for x in data)
         self.put_command(f"Command: '{bindump}'", bindump)
+
+    def transmit_to_emulator(self, data):
+        if TRANSMIT_ADDRESS:
+            requests.post(TRANSMIT_ADDRESS, data=json.dumps(data))
     
     @display_command_constlen(opcode = 0x02, length = 0x02)
     def handle_command_02(self, data):
@@ -204,6 +214,10 @@ class Decoder(DecoderArchetype):
     
     @display_command_constlen(opcode = 0x05, length = 0x02)
     def handle_command_05(self, data):
+        self.handle_unknown_command(data)
+
+    @display_command_constlen(opcode = 0x1B, length = 0x02)
+    def handle_command_1b(self, data):
         self.handle_unknown_command(data)
     
     @display_command_constlen(opcode = 0x20, length = 0x02)
@@ -265,7 +279,18 @@ class Decoder(DecoderArchetype):
     def handle_text_command(self, data):
         # Doesn't work sometimes - text length is miscalculated.
         if len(data) == 4:
+            if not data[2]:
+                # The weird packet
+                # The header here appears to be 5 bytes long.
+                # To make it compatible with the old code,
+                # one byte will be removed, and then read again
+                length = data[3] + 1
+                self.data_current_command = self.data_current_command[:-1]
+                self.data_current_command_bytes_remaining = length
+                return True
             length = data[2] & 0b00011111
+            if not length:
+                return False
             self.data_current_command_bytes_remaining = length
             # The command isn't over!
             return True
@@ -295,6 +320,7 @@ class Decoder(DecoderArchetype):
             text_bytes = bytes(data[4:])
             temp_bytes = []
             output_text = ""
+            emu_data = []
             first_seq_byte = None
             for byte in text_bytes:
                 if first_seq_byte is None:
@@ -303,7 +329,9 @@ class Decoder(DecoderArchetype):
                         continue
                     temp_bytes.append(byte)
                 else:
-                    output_text += self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+                    temp_text = self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+                    output_text += temp_text
+                    emu_data += list(temp_text)
                     temp_bytes = []
                     
                     namespace = special_sjis_sequences[first_seq_byte]
@@ -313,11 +341,21 @@ class Decoder(DecoderArchetype):
                     else:
                         sequence_name = namespace[byte]
                     output_text += f"<{sequence_name}>"
+                    emu_data.append(sequence_name)
                     first_seq_byte = None
-            output_text += self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+            temp_text = self.decode_text_or_error(temp_bytes, encoding_map[encoding])
+            output_text += temp_text
+            emu_data += list(temp_text)
                 
             self.put_command(
                 f"Write '{output_text}' ({encoding_map[encoding]}) in ?{row=}, ?{col=}",
                 f"Write '{output_text}' in ?{row=}, ?{col=}",
                 f"'{output_text}'"
             )
+
+            self.transmit_to_emulator({
+                "type": "display",
+                "row": row,
+                "col": col,
+                "data": emu_data
+            })
