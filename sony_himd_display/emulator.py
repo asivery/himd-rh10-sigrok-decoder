@@ -47,10 +47,18 @@ def handle_event(event):
     global current_state, states
     _type = event["type"]
     if _type == "display":
-        row, col, data = event["row"], event["col"], event["data"]
-        current_state.screen_matrix[row][col:col+len(data)] = data
+        row, col, data, clear_remain = event["row"], event["col"], event["data"], event["clearRemaining"]
+        if clear_remain:
+            current_state.screen_matrix[row][col:] = data
+        else:
+            current_state.screen_matrix[row][col:col+len(data)] = data
     if _type == "clear":
-        current_state.screen_matrix = create_screen_matrix()
+        temp_matrix = create_screen_matrix()
+        for row in event["rows"]:
+            current_state.screen_matrix[row] = temp_matrix[row]
+    if _type == "init":
+        current_state = State()
+        states = []
     
     states.append(deepcopy(current_state))
 
