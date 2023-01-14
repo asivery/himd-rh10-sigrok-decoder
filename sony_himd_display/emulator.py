@@ -4,7 +4,10 @@ from PyQt5.QtCore import Qt
 from dataclasses import dataclass, field
 from copy import deepcopy
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import List
 import json
+
+DEFAULT_COLOR = (0, 101, 184)
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -28,37 +31,59 @@ def server_main():
 
 ht_thread = Thread(target=server_main)
 ht_thread.start()
+@dataclass
+class Row:
+    data: List[str] = field(default_factory=lambda: [''] * 20)
+    inverted: bool = False
 
 def create_screen_matrix():
     a = []
     for _ in range(6):
-        a.append(['']*20)
+        a.append(Row())
     return a
+
 
 @dataclass
 class State:
-    screen_matrix: list[list[str]] = field(default_factory=create_screen_matrix)
+    screen_matrix: List[Row] = field(default_factory=create_screen_matrix)
+    message: str = "<unset>"
     
 
 current_state = State()
 states = []
+events = []
 
 def handle_event(event):
-    global current_state, states
+    global current_state, states, events
+    events.append(event)
+    current_state.message = "Unset"
     _type = event["type"]
     if _type == "display":
         row, col, data, clear_remain = event["row"], event["col"], event["data"], event["clearRemaining"]
         if clear_remain:
-            current_state.screen_matrix[row][col:] = data
+            # E0, E3
+            current_state.screen_matrix[row].data[col:] = data
         else:
-            current_state.screen_matrix[row][col:col+len(data)] = data
+            current_state.screen_matrix[row].data[col:col+len(data)] = data
+        current_state.message = f"Set {row=} to {data}"
     if _type == "clear":
-        temp_matrix = create_screen_matrix()
         for row in event["rows"]:
-            current_state.screen_matrix[row] = temp_matrix[row]
+            current_state.screen_matrix[row].data = [''] * 20
+        current_state.message = f"Clear rows: {', '.join(str(x) for x in event['rows'])}"
     if _type == "init":
         current_state = State()
+        current_state.message = "init"
         states = []
+    if _type == "invert":
+        rows = event["rows"]
+        current_state.message = f'Invert rows: {rows}'
+        #for row in range(6):
+            #if row in rows:
+                #current_state.screen_matrix[row].inverted = not current_state.screen_matrix[row].inverted
+            #else:
+                #current_state.screen_matrix[row].inverted = False
+        for row in range(6):
+            current_state.screen_matrix[row].inverted = row in rows
     
     states.append(deepcopy(current_state))
 
@@ -106,16 +131,31 @@ class MainWindow(QtWidgets.QMainWindow):
             states = []
             current_state = State()
         reset_all_state.clicked.connect(_reset_f)
-        
+        def dump_events():
+            with open("events", "w") as e:
+                json.dump(events, e)
+        def load_events():
+            global events
+            with open("events", "r") as e:
+                events = json.load(e)
+                for q in events:
+                    handle_event(q)
+        save_events_b = QtWidgets.QPushButton("Save Events")
+        save_events_b.clicked.connect(dump_events)
+        load_events_b = QtWidgets.QPushButton("Load Events")
+        load_events_b.clicked.connect(load_events)
         layout.addWidget(self.label)
         layout.addWidget(self.slider)
         layout.addWidget(eventsBox)
         layout.addWidget(reset_state)
         layout.addWidget(reset_all_state)
+        layout.addWidget(save_events_b)
+        layout.addWidget(load_events_b)
         
         root.setLayout(layout)
         self.setCentralWidget(root)
         
+        self.statusBar().show()
         self.update_counters()
 
     def check_for_update(self):
@@ -143,18 +183,22 @@ class MainWindow(QtWidgets.QMainWindow):
             state = states[sval - 1]
         self.render_state(state)
 
+
+    def set_painter_color(self, painter, color = DEFAULT_COLOR):
+        pen = QtGui.QPen()
+        pen.setWidth(1)
+        pen.setColor(QtGui.QColor(*color))  # r, g, b
+        painter.setPen(pen)
+
+
     def render_state(self, state):
         self.canvas.fill(Qt.black)
         painter = QtGui.QPainter(self.label.pixmap())
-        pen = QtGui.QPen()
-        pen.setWidth(1)
-        pen.setColor(QtGui.QColor(0, 101, 184))  # r, g, b
-        painter.setPen(pen)
         painter.fillRect(0, 0, 128, 96, QtGui.QColor(0,0,0))
+        self.set_painter_color(painter)
 
         # Is this line there permanently?
         painter.drawLine(0, 8, 128, 8)
-
         x, y = 0, 8
         font = QtGui.QFont()
         font.setFamily('monospace')
@@ -165,20 +209,29 @@ class MainWindow(QtWidgets.QMainWindow):
         remaps = {
             # A terrible way to convert to zenkaku numbers:
             **dict((f"big {x}", chr(x+65296)) for x in range(10)),
-            "big :": ":"
+            "big :": ":",
+            "volume icon": "🔊",
+            "music note": "🎵",
+            "folder": "📁",
+            "minidisc": "💽",
         }
 
         for row in range(6):
-            for char in state.screen_matrix[row]:
+            if state.screen_matrix[row].inverted:
+                self.set_painter_color(painter, (0, 0, 0))
+                painter.fillRect(x, y - 12, 128, 16, QtGui.QColor(*DEFAULT_COLOR))
+            for char in state.screen_matrix[row].data:
                 try:
                     painter.drawText(x, y, remaps.get(char, char))
                 except Exception as e:
                     print(e) 
                 x += 6
+            self.set_painter_color(painter)
             y += 16
             x = 0
         painter.end()
         self.update()
+        self.statusBar().showMessage(state.message, 2000)
         
 if __name__ == "__main__":
     app = QtWidgets.QApplication( [] )

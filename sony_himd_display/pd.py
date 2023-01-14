@@ -36,7 +36,7 @@ class DecodingState(Enum):
     IDLE, PROLOGUE, DATA = range(3)
 
 class AnnotationType():
-    STATE, DEBUG, ASCII, COMMAND, ERROR, DEBUG2 = range(6)
+    STATE, DEBUG, ASCII, COMMAND, ERROR, DEBUG2, EMU = range(7)
 
 class Decoder(DecoderArchetype):
     api_version = 3
@@ -56,6 +56,7 @@ class Decoder(DecoderArchetype):
         ('ascii', 'Ascii'),
         ('commands', 'Commands'),
         ('errors', 'Errors'),
+        ('emulator', 'Emulator Indices'),
     )
     annotation_rows = (
         ('state', 'States', (AnnotationType.STATE,)),
@@ -64,6 +65,7 @@ class Decoder(DecoderArchetype):
         ('ascii', 'ASCII', (AnnotationType.ASCII,)),
         ('commands', 'Commands', (AnnotationType.COMMAND,)),
         ('errors', 'Errors', (AnnotationType.ERROR,)),
+        ('emulator', 'Emulator Indices', (AnnotationType.EMU,)),
     )
     constant_length_commands = {}
     
@@ -73,6 +75,7 @@ class Decoder(DecoderArchetype):
     
     def reset(self):
         # Overall state
+        self.emulator_index = 0
         self.state = DecodingState.IDLE
         self.start_of_current_state = None
         
@@ -96,7 +99,7 @@ class Decoder(DecoderArchetype):
         self.state = newState
         
     def handle_starting_byte(self, b, s, e):
-        if b in [ 0x3D, 0x3F, 0xFF, 0x37 ]:
+        if b in [ 0x3D, 0x3F, 0xFF, 0x37, 0x1F, 0x2f ]:
             self.switch_state(DecodingState.PROLOGUE, s)
             self.prologue_bytes_remaining = 3
         else:
@@ -165,7 +168,7 @@ class Decoder(DecoderArchetype):
         if name != "DATA":
             return
         
-        if value in range(ord(' '), ord('z')):
+        if value in range(ord(' '), ord('z')) and self.state == DecodingState.DATA:
             self.put(start, end, self.out_ann,
                      [AnnotationType.ASCII, [f"'{chr(value)}'"]])
         
@@ -207,6 +210,9 @@ class Decoder(DecoderArchetype):
 
     def transmit_to_emulator(self, data):
         if TRANSMIT_ADDRESS:
+            self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
+                 [AnnotationType.EMU, [f"Emulator command #{self.emulator_index} ({data['type']})", f"#{self.emulator_index} ({data['type']})", f"#{self.emulator_index}"]])
+            self.emulator_index += 1
             requests.post(TRANSMIT_ADDRESS, data=json.dumps(data))
     
     @display_command_constlen(opcode = 0x02, length = 0x02)
@@ -231,14 +237,23 @@ class Decoder(DecoderArchetype):
         
     @display_command_constlen(opcode = 0x04, length = 0x02)
     def handle_command_04(self, data):
+        # Probably "Redraw selected rows"
         self.handle_unknown_command(data)
     
     @display_command_constlen(opcode = 0x05, length = 0x02)
-    def handle_command_05_hb2(self, data):
-        additional = data[1]
-        if additional != 0xFF:
-            self.put_debug(f"Heartbeat 0x05 {additional=}")
-        self.put_command("Heartbeat 0x05", "HB5")
+    def handle_command_05_inv(self, data):
+        rows = data[1]
+        rows_list = [x for x in range(6) if (((1 << x) & rows) == 0)]
+        rowsstr = ', '.join(str(x) for x in rows_list)
+        self.transmit_to_emulator({
+            "type": "invert",
+            "rows": rows_list,
+        })
+        self.put_command(f"Invert rows {rowsstr}", f"Invert {rowsstr}", "Invert", "INV")
+
+    @display_command_constlen(opcode = 0x13, length = 0x02)
+    def handle_command_13(self, data):
+        self.handle_unknown_command(data)
 
     @display_command_constlen(opcode = 0x1B, length = 0x02)
     def handle_command_1b(self, data):
@@ -266,12 +281,24 @@ class Decoder(DecoderArchetype):
         self.handle_unknown_command(data)
     
     @display_command_constlen(opcode = 0x54, length = 0x05)
-    def handle_command_54(self, data):
-        self.handle_unknown_command(data)
+    def handle_command_54_scroll(self, data):
+        # Invert rows
+        rows = data[1]
+        rows_list = [x for x in range(6) if (((1 << x) & rows) != 0)]
+        rowsstr = ', '.join(str(x) for x in rows_list)
+        self.put_command(f"Enable scrolling for {rowsstr}?", f"Scroll {rowsstr}", "Scroll", "SCRL")
+
 
     @display_command_constlen(opcode = 0x56, length = 0x05)
     def handle_command_56(self, data):
-        self.handle_unknown_command(data)
+        rows = data[1]
+        # Unknown
+        key = data[2]
+        value = data[3]
+        # /Unknown
+        rows_list = [x for x in range(6) if (((1 << x) & rows) != 0)]
+        rowsstr = ', '.join(str(x) for x in rows_list)
+        self.put_command(f"For rows {rowsstr}, set {key}={value}", f"{rowsstr}, {key}={value}", f"AFF{rowsstr}", "AFF")
     
     @display_command_constlen(opcode = 0x68, length = 0x05)
     def handle_command_68(self, data):
@@ -306,7 +333,11 @@ class Decoder(DecoderArchetype):
         }
         special_sjis_sequences = {
             0xFD: {
-                **dict((0x65 + x, f"big {x}") for x in range(10))
+                **dict((0x65 + x, f"big {x}") for x in range(10)),
+                0x70: 'volume icon',
+                0x86: "music note",
+                0x93: "folder",
+                0x6f: "minidisc",
             },
             0xFA: {
                 0x55: 'big :'
@@ -353,14 +384,11 @@ class Decoder(DecoderArchetype):
             self.data_current_command_bytes_remaining = length
             return True
         else:
-            self.put_debug("E2 COMMAND")
             flag_bit = (data[2] & (1 << 7)) != 0
             encoding = data[4]
             what = data[2]
             row = int(math.log(data[1], 2))
             text_bytes = data[5:]
-            if flag_bit != 0:
-                self.put_debug2(f"E2 {flag_bit=}")
             output_text, emu_data = self.process_text(text_bytes, encoding)
             self.put_command(
                 f"Write special '{output_text}' in {row=} {what=}",
@@ -388,7 +416,7 @@ class Decoder(DecoderArchetype):
             return True
         else:
             # What col and row are in reality is unknown
-            col = 3 if data[0] == 0xE3 else 0
+            col = 4 if data[0] == 0xE3 else 0
             row = int(math.log(data[1], 2))
             encoding = data[3]
             text_bytes = bytes(data[4:])
