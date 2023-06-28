@@ -8,6 +8,8 @@ from typing import List
 import json
 
 DEFAULT_COLOR = (0, 101, 184)
+SCROLL_BAR_WIDTH = 6
+TOP_RESERVED_PX = 15
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -42,11 +44,18 @@ def create_screen_matrix():
         a.append(Row())
     return a
 
+@dataclass
+class ScrollBar:
+    enabled: bool = False
+    from_px: int = 0
+    to_px: int = 0
+    
 
 @dataclass
 class State:
     screen_matrix: List[Row] = field(default_factory=create_screen_matrix)
     message: str = "<unset>"
+    scroll_bar_state: ScrollBar = ScrollBar()
     
 
 current_state = State()
@@ -84,6 +93,11 @@ def handle_event(event):
                 #current_state.screen_matrix[row].inverted = False
         for row in range(6):
             current_state.screen_matrix[row].inverted = row in rows
+    if _type == "scrollbar":
+        current_state.scroll_bar_state.from_px = event['from']
+        current_state.scroll_bar_state.to_px = event['to']
+        current_state.scroll_bar_state.enabled = event['enabled']
+        current_state.message = f'Update scroll bar {current_state.scroll_bar_state.from_px} => {current_state.scroll_bar_state.to_px}, enabled = {current_state.scroll_bar_state.enabled}'
     
     states.append(deepcopy(current_state))
 
@@ -198,8 +212,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_painter_color(painter)
 
         # Is this line there permanently?
-        painter.drawLine(0, 8, 128, 8)
-        x, y = 0, 8
+        painter.drawLine(0, TOP_RESERVED_PX, 128, TOP_RESERVED_PX)
+        x, y = 0, TOP_RESERVED_PX
         font = QtGui.QFont()
         font.setFamily('monospace')
         font.setBold(True)
@@ -229,6 +243,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_painter_color(painter)
             y += 16
             x = 0
+            
+        if state.scroll_bar_state.enabled:
+            painter.fillRect(128 - SCROLL_BAR_WIDTH, TOP_RESERVED_PX, 1, 96 - TOP_RESERVED_PX, QtGui.QColor(*DEFAULT_COLOR))
+            painter.fillRect(128 - SCROLL_BAR_WIDTH, state.scroll_bar_state.from_px + TOP_RESERVED_PX, SCROLL_BAR_WIDTH, state.scroll_bar_state.to_px - state.scroll_bar_state.from_px, QtGui.QColor(*DEFAULT_COLOR))
         painter.end()
         self.update()
         self.statusBar().showMessage(state.message, 2000)

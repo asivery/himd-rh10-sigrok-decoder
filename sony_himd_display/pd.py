@@ -37,6 +37,24 @@ class DecodingState(Enum):
 
 class AnnotationType():
     STATE, DEBUG, ASCII, COMMAND, ERROR, DEBUG2, EMU = range(7)
+    
+class DescriptionFile:
+    def __init__(self, path) -> None:
+        self.path = path
+        self.handle = open(path, 'w')
+        self.part = 0
+    def log_command(self, command: bytes) -> None:
+        self.handle.write('-' * 80 + '\n')
+        self.handle.write(' '.join(('' if x > 0x10 else '0') + hex(x)[2:] for x in command) + '\n')
+        self.part = 0
+    def log_described(self, text: str) -> None:
+        self.handle.write(f'{self.part + 1}. {text}\n')
+        self.part += 1
+    def log_emulator_marker(self, marker_index: int) -> None:
+        self.handle.write(f'---EMU MARKER #{marker_index}---\n')
+    def close(self):
+        self.handle.close()
+        
 
 class Decoder(DecoderArchetype):
     api_version = 3
@@ -91,6 +109,8 @@ class Decoder(DecoderArchetype):
         self.data_current_command_end = 0
         self.data_current_command_bytes_remaining = 0
         
+        self.descriptor_file = None #DescriptionFile('/ram/desc')
+        
         
     def switch_state(self, newState, first_of_new):
         self.put(self.start_of_current_state, first_of_new, self.out_ann,
@@ -136,6 +156,8 @@ class Decoder(DecoderArchetype):
             
         if self.data_current_command_handler and self.data_current_command_bytes_remaining == 0:
             # We've read all the bytes of the current command
+            if self.descriptor_file:
+                self.descriptor_file.log_command(self.data_current_command)
             if not self.data_current_command_handler(self, self.data_current_command):
                 self.data_current_command = []
                 self.data_current_command_handler = None
@@ -191,9 +213,16 @@ class Decoder(DecoderArchetype):
         self.reset()
         self.out_ann = None
         
+    def create_rows_string(self, rows):
+        rows_list = [x for x in range(6) if (((1 << x) & rows) == 0)]
+        rowsstr = ', '.join(str(x) for x in rows_list)
+        return (rowsstr, rows_list)
+
     def put_command(self, *desc):
         self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
                  [AnnotationType.COMMAND, [*desc]])
+        if self.descriptor_file:
+            self.descriptor_file.log_described(desc[0])
     def put_error(self, *desc):
         self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
                  [AnnotationType.ERROR, [*desc]])
@@ -212,6 +241,8 @@ class Decoder(DecoderArchetype):
         if TRANSMIT_ADDRESS:
             self.put(self.data_current_command_start, self.data_current_command_end, self.out_ann,
                  [AnnotationType.EMU, [f"Emulator command #{self.emulator_index} ({data['type']})", f"#{self.emulator_index} ({data['type']})", f"#{self.emulator_index}"]])
+            if self.descriptor_file:
+                self.descriptor_file.log_emulator_marker(self.emulator_index)
             self.emulator_index += 1
             requests.post(TRANSMIT_ADDRESS, data=json.dumps(data))
     
@@ -238,13 +269,12 @@ class Decoder(DecoderArchetype):
     @display_command_constlen(opcode = 0x04, length = 0x02)
     def handle_command_04(self, data):
         # Probably "Redraw selected rows"
-        self.handle_unknown_command(data)
+        self.put_command(f"Inverse of the previous 0x05 command", "INV04", "04")
     
     @display_command_constlen(opcode = 0x05, length = 0x02)
     def handle_command_05_inv(self, data):
         rows = data[1]
-        rows_list = [x for x in range(6) if (((1 << x) & rows) == 0)]
-        rowsstr = ', '.join(str(x) for x in rows_list)
+        rowsstr, rows_list = self.create_rows_string(rows)
         self.transmit_to_emulator({
             "type": "invert",
             "rows": rows_list,
@@ -262,6 +292,7 @@ class Decoder(DecoderArchetype):
     @display_command_constlen(opcode = 0x20, length = 0x02)
     def handle_command_20(self, data):
         # RH910 only
+        # Contrast maybe? The RH910 is an LCD device - OLEDs don't have contrast config.
         self.handle_unknown_command(data)
         
     @display_command_constlen(opcode = 0x23, length = 0x02)
@@ -278,14 +309,17 @@ class Decoder(DecoderArchetype):
         
     @display_command_constlen(opcode = 0x53, length = 0x05)
     def handle_command_53(self, data):
-        self.handle_unknown_command(data)
+        rows = data[1]
+        rowsstr, _ = self.create_rows_string(rows)
+        is_data_3_0x13 = data[3] == 0x13
+        unknown = data[2]
+        self.put_command(f"0x53 - affect rows {rowsstr}, {unknown=} {'' if is_data_3_0x13 else f'/{data[3]}'}", "0x53")
     
     @display_command_constlen(opcode = 0x54, length = 0x05)
     def handle_command_54_scroll(self, data):
         # Invert rows
         rows = data[1]
-        rows_list = [x for x in range(6) if (((1 << x) & rows) != 0)]
-        rowsstr = ', '.join(str(x) for x in rows_list)
+        rowsstr, _ = self.create_rows_string(rows)
         self.put_command(f"Enable scrolling for {rowsstr}?", f"Scroll {rowsstr}", "Scroll", "SCRL")
 
 
@@ -296,13 +330,28 @@ class Decoder(DecoderArchetype):
         key = data[2]
         value = data[3]
         # /Unknown
-        rows_list = [x for x in range(6) if (((1 << x) & rows) != 0)]
-        rowsstr = ', '.join(str(x) for x in rows_list)
+        rowsstr, _ = self.create_rows_string(rows)
         self.put_command(f"For rows {rowsstr}, set {key}={value}", f"{rowsstr}, {key}={value}", f"AFF{rowsstr}", "AFF")
     
     @display_command_constlen(opcode = 0x68, length = 0x05)
     def handle_command_68(self, data):
-        self.handle_unknown_command(data)
+        # Scrollbar command
+        px_start = data[1]
+        px_end = data[2]
+        unk_use_smaller_list = data[3]
+        enable = data[4]
+        self.transmit_to_emulator({
+            "type": "scrollbar",
+            "from": px_start,
+            "to": px_end,
+            "enabled": enable == 1
+        })
+
+        self.put_command(
+            f"Scrollbar - set bar from px {px_start} to {px_end} ({unk_use_smaller_list})" if enable else 'Disable scrollbar',
+            f"Scroll {px_start} => {px_end}" if enable else 'Scroll disable',
+            f"Scroll {'EN' if enable else 'DIS'}"
+        )
     
     @display_command_constlen(opcode = 0x6a, length = 0x05)
     def handle_command_6a(self, data):
@@ -345,7 +394,7 @@ class Decoder(DecoderArchetype):
         }
         if encoding not in encoding_map:
             self.put_error(f"Unknown encoding: {hex(encoding)}")
-            encoding = 0x05
+            encoding = 0x90
         temp_bytes = []
         output_text = ""
         emu_data = []
