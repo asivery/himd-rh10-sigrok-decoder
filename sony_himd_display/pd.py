@@ -213,8 +213,8 @@ class Decoder(DecoderArchetype):
         self.reset()
         self.out_ann = None
         
-    def create_rows_string(self, rows):
-        rows_list = [x for x in range(6) if (((1 << x) & rows) == 0)]
+    def create_rows_string(self, rows, inverted = False):
+        rows_list = [x for x in range(6) if (((1 << x) & rows) != 0) ^ inverted]
         rowsstr = ', '.join(str(x) for x in rows_list)
         return (rowsstr, rows_list)
 
@@ -274,7 +274,7 @@ class Decoder(DecoderArchetype):
     @display_command_constlen(opcode = 0x05, length = 0x02)
     def handle_command_05_inv(self, data):
         rows = data[1]
-        rowsstr, rows_list = self.create_rows_string(rows)
+        rowsstr, rows_list = self.create_rows_string(rows, True)
         self.transmit_to_emulator({
             "type": "invert",
             "rows": rows_list,
@@ -352,6 +352,31 @@ class Decoder(DecoderArchetype):
             f"Scroll {px_start} => {px_end}" if enable else 'Scroll disable',
             f"Scroll {'EN' if enable else 'DIS'}"
         )
+
+    @display_command_constlen(opcode = 0x69, length = 0x05)
+    def handle_command_69(self, data):
+        # Track progress bar mid-playback command
+        rows = data[1]
+        unk_px_start = data[2]
+        unk_px_end = data[3]
+        unk_enabled = data[4]
+
+        rowsstr, rows_list = self.create_rows_string(rows)
+
+        self.transmit_to_emulator({
+            "type": "trackbar",
+            "from": unk_px_start,
+            "to": unk_px_end,
+            "enabled": unk_enabled,
+            "rows": rows_list[0],
+        })
+
+        self.put_command(
+            f"? In row {rowsstr} set track progress bar from {unk_px_start} to {unk_px_end}" if unk_enabled else f'? In row {rowsstr} disable track progress bar',
+            f"? Trackbar {unk_px_start} => {unk_px_end}" if unk_enabled else 'Disable trackbar',
+            'Trackbar on' if unk_enabled else 'Trackbar off',
+        )
+        self.put_debug2("trackbar")
     
     @display_command_constlen(opcode = 0x6a, length = 0x05)
     def handle_command_6a(self, data):

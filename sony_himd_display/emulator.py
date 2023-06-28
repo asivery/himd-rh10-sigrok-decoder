@@ -10,6 +10,9 @@ import json
 DEFAULT_COLOR = (0, 101, 184)
 SCROLL_BAR_WIDTH = 6
 TOP_RESERVED_PX = 15
+TRACK_BAR_WIDTH = 65
+TRACK_BAR_HMARGIN = 5
+TRACK_BAR_STARTX = 60 #?
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,13 +52,21 @@ class ScrollBar:
     enabled: bool = False
     from_px: int = 0
     to_px: int = 0
+
+@dataclass
+class TrackBar:
+    enabled: bool = False
+    from_px: int = 0
+    to_px: int = 0
+    row: int = 0
     
 
 @dataclass
 class State:
     screen_matrix: List[Row] = field(default_factory=create_screen_matrix)
     message: str = "<unset>"
-    scroll_bar_state: ScrollBar = ScrollBar()
+    scroll_bar_state: ScrollBar = field(default_factory=ScrollBar)
+    track_bar_state: TrackBar = field(default_factory=TrackBar)
     
 
 current_state = State()
@@ -76,6 +87,10 @@ def handle_event(event):
             current_state.screen_matrix[row].data[col:col+len(data)] = data
         current_state.message = f"Set {row=} to {data}"
     if _type == "clear":
+        # HACK: Not sure if this is meant to work like this, or if there's a separate command to clear
+        # the track progress bar.
+        if current_state.track_bar_state.row in event['rows']:
+            current_state.track_bar_state.enabled = False
         for row in event["rows"]:
             current_state.screen_matrix[row].data = [''] * 20
         current_state.message = f"Clear rows: {', '.join(str(x) for x in event['rows'])}"
@@ -98,7 +113,12 @@ def handle_event(event):
         current_state.scroll_bar_state.to_px = event['to']
         current_state.scroll_bar_state.enabled = event['enabled']
         current_state.message = f'Update scroll bar {current_state.scroll_bar_state.from_px} => {current_state.scroll_bar_state.to_px}, enabled = {current_state.scroll_bar_state.enabled}'
-    
+    if _type == "trackbar":
+        current_state.track_bar_state.enabled = event['enabled']
+        current_state.track_bar_state.to_px = event['to']
+        current_state.track_bar_state.from_px = event['from']
+        current_state.track_bar_state.row = event['rows']
+        current_state.message = f'Update track bar {current_state.track_bar_state.from_px} => {current_state.track_bar_state.to_px}, enabled = {current_state.track_bar_state.enabled}'
     states.append(deepcopy(current_state))
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -205,9 +225,10 @@ class MainWindow(QtWidgets.QMainWindow):
         painter.setPen(pen)
 
 
-    def render_state(self, state):
+    def render_state(self, state: State):
         self.canvas.fill(Qt.black)
         painter = QtGui.QPainter(self.label.pixmap())
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.fillRect(0, 0, 128, 96, QtGui.QColor(0,0,0))
         self.set_painter_color(painter)
 
@@ -233,7 +254,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(6):
             if state.screen_matrix[row].inverted:
                 self.set_painter_color(painter, (0, 0, 0))
-                painter.fillRect(x, y - 12, 128, 16, QtGui.QColor(*DEFAULT_COLOR))
+                invert_box_width = (128 - SCROLL_BAR_WIDTH - 1) if state.scroll_bar_state.enabled else 128
+                painter.fillRect(x, y - 12, invert_box_width, 16, QtGui.QColor(*DEFAULT_COLOR))
             for char in state.screen_matrix[row].data:
                 try:
                     painter.drawText(x, y, remaps.get(char, char))
@@ -244,6 +266,25 @@ class MainWindow(QtWidgets.QMainWindow):
             y += 16
             x = 0
             
+        if state.track_bar_state.enabled:
+            self.set_painter_color(painter)
+            painter.drawRoundedRect(
+                TRACK_BAR_STARTX,
+                16 * state.track_bar_state.row + TRACK_BAR_HMARGIN,
+                TRACK_BAR_WIDTH,
+                16 - TRACK_BAR_HMARGIN,
+                TRACK_BAR_HMARGIN, TRACK_BAR_HMARGIN
+            )
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(
+                TRACK_BAR_STARTX,
+                16 * state.track_bar_state.row + TRACK_BAR_HMARGIN + state.track_bar_state.from_px - 1,
+                state.track_bar_state.to_px - state.track_bar_state.from_px + 1,
+                16 - TRACK_BAR_HMARGIN,
+                TRACK_BAR_HMARGIN, TRACK_BAR_HMARGIN
+            )
+            painter.fillPath(path, QtGui.QColor(*DEFAULT_COLOR))
+
         if state.scroll_bar_state.enabled:
             painter.fillRect(128 - SCROLL_BAR_WIDTH, TOP_RESERVED_PX, 1, 96 - TOP_RESERVED_PX, QtGui.QColor(*DEFAULT_COLOR))
             painter.fillRect(128 - SCROLL_BAR_WIDTH, state.scroll_bar_state.from_px + TOP_RESERVED_PX, SCROLL_BAR_WIDTH, state.scroll_bar_state.to_px - state.scroll_bar_state.from_px, QtGui.QColor(*DEFAULT_COLOR))
