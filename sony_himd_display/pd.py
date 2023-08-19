@@ -386,6 +386,10 @@ class Decoder(DecoderArchetype):
     def handle_command_6b(self, data):
         self.handle_unknown_command(data)
         
+    @display_command_constlen(opcode = 0x75, length = 0x07)
+    def handle_command_75(self, data):
+        self.handle_unknown_command(data)
+    
     @display_command_constlen(opcode = 0x91, length = 0x0A)
     def handle_command_91(self, data):
         self.handle_unknown_command(data)
