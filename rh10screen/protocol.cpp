@@ -17,46 +17,44 @@ void serialPrintHex(byte b){
   SerialUSB.print(data[b & 0xF]);
 }
 
-#define CARGS (uint8_t *data, int *ptr)
-#define COMMAND(x) void x CARGS { int &crs = *ptr;
-#define END_COMMAND }
+#define CARGS (uint8_t *data, int &crs)
+#define COMMAND(x) void x CARGS
 #define NEXT (data[crs++])
 typedef void (*command_handler) CARGS;
 
-COMMAND(handleSetInvertedRows)
+COMMAND(handleSetInvertedRows){
   uint8_t rows = NEXT;
   screen->setRowsInvertedBitfield(~rows);
-END_COMMAND
+}
 
-COMMAND(handleClear)
+COMMAND(handleClear){
   uint8_t clearMap = NEXT;
   for(int i = 0; i<6; i++){
-    if(clearMap & (1 << i) != 0){
+    if((clearMap & (1 << i)) != 0){
       screen->clearRow(i);
     }
   }
-END_COMMAND
+}
 
-COMMAND(handleScrollbarManage)
+COMMAND(handleScrollbarManage){
   byte pixelStart = NEXT;
   byte pixelEnd = NEXT;
   byte unk = NEXT;
   byte enable = NEXT;
   
   screen->processScrollBar(pixelStart, pixelEnd, enable);
-END_COMMAND
+}
 
-COMMAND(handleTrackbarManage)
+COMMAND(handleTrackbarManage){
   byte rows = rowBitfieldToFirst(NEXT);
   byte pixelStart = NEXT;
   byte pixelEnd = NEXT;
   byte enable = NEXT;
 
   screen->processTrackBar(pixelStart, pixelEnd, rows, enable);
-  screen->clearRow(rows);
-END_COMMAND
+}
 
-COMMAND(handleText)
+COMMAND(handleText){
   uint8_t opcode = NEXT;  
   uint8_t rowBitfield = NEXT;
   uint8_t length = NEXT & 0b01111111;
@@ -67,9 +65,9 @@ COMMAND(handleText)
   uint8_t row = rowBitfieldToFirst(rowBitfield);
 
   screen->setRow(row, opcode == 0xE3, text, 30);
-END_COMMAND
+}
 
-COMMAND(handleTextE2)
+COMMAND(handleTextE2){
   uint8_t rowBitfield = NEXT;
   uint8_t what = NEXT;
   uint8_t length = NEXT & 0b01111111;
@@ -79,15 +77,15 @@ COMMAND(handleTextE2)
   char text[40] = {0};
   for(int i = 0; i<length; i++) text[i] = NEXT;
   screen->setRow(row, false, text, length);
-END_COMMAND
+}
 
 void Protocol::begin(Screen *_screen){
   screen = _screen;
 }
 
 #define IGNORE(opcode, len) case opcode: i += len; break
-#define BIND(opcode, handler) case opcode: handler(data, &++i); break
-#define BIND_WITHOPCODE(opcode, handler) case opcode: handler(data, &i); break
+#define BIND(opcode, handler) case opcode: handler(data, ++i); break
+#define BIND_WITHOPCODE(opcode, handler) case opcode: handler(data, i); break
 void Protocol::handleIncomingMessage(uint8_t *data){
   int i = 0;
   
@@ -99,6 +97,7 @@ void Protocol::handleIncomingMessage(uint8_t *data){
       // Prologues
       IGNORE(0x3D, 3);
       IGNORE(0x3F, 3);
+      IGNORE(0x3B, 3);
       IGNORE(0xFF, 3);
       IGNORE(0x37, 3);
       IGNORE(0x1F, 3);
