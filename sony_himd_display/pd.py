@@ -281,6 +281,13 @@ class Decoder(DecoderArchetype):
         })
         self.put_command(f"Invert rows {rowsstr}", f"Invert {rowsstr}", "Invert", "INV")
 
+    @display_command_constlen(opcode = 0x11, length = 0x02)
+    def handle_command_11_format(self, data):
+        format_info = data[1]
+        is_hi = format_info & 2
+        is_md = format_info & 1
+        self.put_command(f"Format icons: {is_hi=} {is_md}", f"{is_hi=} {is_md}", "Format", "FMT")
+
     @display_command_constlen(opcode = 0x13, length = 0x02)
     def handle_command_13_battery(self, data):
         bitfield = data[1]
@@ -290,6 +297,18 @@ class Decoder(DecoderArchetype):
         outline = bitfield & 1
         self.put_command(f"Battery: {outline=} tiles={tiles_str}, {is_charging=}", "Battery")
 
+    @display_command_constlen(opcode = 0x17, length = 0x02)
+    def handle_command_17_groups(self, data):
+        enabled = data[1]
+        self.put_command(f"Groups: {'On' if enabled else 'Off'}", "Groups", "GRP")
+
+    @display_command_constlen(opcode = 0x18, length = 0x02)
+    def handle_command_18_playmode(self, data):
+        bitfield = ["REP", "1", "SHUF", "A->"]
+        enabled_bitfield = data[1]
+        entries = ', '.join(x for i, x in enumerate(bitfield) if enabled_bitfield & (1 << i))
+        self.put_command(f"Play mode: {entries}", "Play mode", "PM")
+    
     @display_command_constlen(opcode = 0x1B, length = 0x02)
     def handle_command_1b_playglyph(self, data):
         glyph = data[1]
