@@ -7,7 +7,7 @@ import math
 import requests
 import json
 
-TRANSMIT_ADDRESS = "http://localhost:36002"
+TRANSMIT_ADDRESS = None #"http://localhost:36002"
 
 @dataclass(frozen = True)
 class Command:
@@ -109,7 +109,7 @@ class Decoder(DecoderArchetype):
         self.data_current_command_end = 0
         self.data_current_command_bytes_remaining = 0
         
-        self.descriptor_file = None #DescriptionFile('/ram/desc')
+        self.descriptor_file = DescriptionFile('/ram/desc')
         
         
     def switch_state(self, newState, first_of_new):
@@ -282,12 +282,19 @@ class Decoder(DecoderArchetype):
         self.put_command(f"Invert rows {rowsstr}", f"Invert {rowsstr}", "Invert", "INV")
 
     @display_command_constlen(opcode = 0x13, length = 0x02)
-    def handle_command_13(self, data):
-        self.handle_unknown_command(data)
+    def handle_command_13_battery(self, data):
+        bitfield = data[1]
+        is_charging = bitfield & (1 << 7)
+        tiles = (bitfield & 0b11110) >> 1
+        tiles_str = ', '.join(str(x) for x in range(4) if bitfield & (1 << x))
+        outline = bitfield & 1
+        self.put_command(f"Battery: {outline=} tiles={tiles_str}, {is_charging=}", "Battery")
 
     @display_command_constlen(opcode = 0x1B, length = 0x02)
-    def handle_command_1b(self, data):
-        self.handle_unknown_command(data)
+    def handle_command_1b_playglyph(self, data):
+        glyph = data[1]
+        glyphs = ["none", "stop", "play", "pause", "ff", "rev", "ffn", "revp"]
+        self.put_command(f"Display glyph: {glyphs[glyph]}", f"Glyph: {glyphs[glyph]}", glyphs[glyph])
     
     @display_command_constlen(opcode = 0x20, length = 0x02)
     def handle_command_20(self, data):
@@ -296,24 +303,30 @@ class Decoder(DecoderArchetype):
         self.handle_unknown_command(data)
         
     @display_command_constlen(opcode = 0x23, length = 0x02)
-    def handle_command_23(self, data):
-        self.handle_unknown_command(data)
+    def handle_command_23_topbar(self, data):
+        action = "Enable" if data[1] else "Disable"
+        self.put_command(f"{action} bar at the top", f"{action[:2].upper()} bar")
 
     @display_command_constlen(opcode = 0x24, length = 0x02)
     def handle_command_24(self, data):
         self.handle_unknown_command(data)
+
+    @display_command_constlen(opcode = 0x30, length = 0x02)
+    def handle_command_30_set_contrast(self, data):
+        contrast = data[1]
+        self.put_command(f"Set contrast to {contrast}", "Contrast")
 
     @display_command_constlen(opcode = 0x50, length = 0x05)
     def handle_command_50(self, data):
         self.handle_unknown_command(data)
         
     @display_command_constlen(opcode = 0x53, length = 0x05)
-    def handle_command_53(self, data):
+    def handle_command_53_limit(self, data):
         rows = data[1]
         rowsstr, _ = self.create_rows_string(rows)
-        is_data_3_0x13 = data[3] == 0x13
-        unknown = data[2]
-        self.put_command(f"0x53 - affect rows {rowsstr}, {unknown=} {'' if is_data_3_0x13 else f'/{data[3]}'}", "0x53")
+        start = data[2]
+        end = data[3]
+        self.put_command(f"Limit text commands for {rowsstr} - start at {start}, end at {end}" f"Limit {rowsstr} - {start}:{end}", "Limit")
     
     @display_command_constlen(opcode = 0x54, length = 0x05)
     def handle_command_54_scroll(self, data):
