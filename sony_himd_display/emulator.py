@@ -4,7 +4,7 @@ from PyQt5.QtCore import Qt
 from dataclasses import dataclass, field
 from copy import deepcopy
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import List
+from typing import List, Union
 import json
 
 DEFAULT_COLOR = (0, 101, 184)
@@ -40,6 +40,8 @@ ht_thread.start()
 class Row:
     data: List[str] = field(default_factory=lambda: [''] * 20)
     inverted: bool = False
+    start: int = 0x00
+    end: int = 0x19
 
 def create_screen_matrix():
     a = []
@@ -60,6 +62,12 @@ class TrackBar:
     to_px: int = 0
     row: int = 0
     
+@dataclass
+class Battery:
+    outline: bool
+    enabled: bool
+    charging: bool
+    segments: int
 
 @dataclass
 class State:
@@ -67,7 +75,13 @@ class State:
     message: str = "<unset>"
     scroll_bar_state: ScrollBar = field(default_factory=ScrollBar)
     track_bar_state: TrackBar = field(default_factory=TrackBar)
-    
+    bar_enabled: bool = False
+    groups_icon_enabled: bool = False
+    is_hi_enabled: bool = False
+    is_md_enabled: bool = False
+    battery: Battery = Battery(False, False, False, 0)
+    play_modes: list[str] = []
+    current_playback_glyph: str = ""
 
 current_state = State()
 states = []
@@ -80,11 +94,13 @@ def handle_event(event):
     _type = event["type"]
     if _type == "display":
         row, col, data, clear_remain = event["row"], event["col"], event["data"], event["clearRemaining"]
+        start = current_state.screen_matrix[row].start
+        data = data[:current_state.screen_matrix[row].end - start]
         if clear_remain:
             # E0, E3
-            current_state.screen_matrix[row].data[col:] = data
+            current_state.screen_matrix[row].data[col+start:] = data
         else:
-            current_state.screen_matrix[row].data[col:col+len(data)] = data
+            current_state.screen_matrix[row].data[col+start:col+len(data)] = data
         current_state.message = f"Set {row=} to {data}"
     if _type == "clear":
         # HACK: Not sure if this is meant to work like this, or if there's a separate command to clear
@@ -93,6 +109,8 @@ def handle_event(event):
             current_state.track_bar_state.enabled = False
         for row in event["rows"]:
             current_state.screen_matrix[row].data = [''] * 20
+            current_state.screen_matrix[row].start = 0
+            current_state.screen_matrix[row].end = 0x19
         current_state.message = f"Clear rows: {', '.join(str(x) for x in event['rows'])}"
     if _type == "init":
         current_state = State()
@@ -119,6 +137,21 @@ def handle_event(event):
         current_state.track_bar_state.from_px = event['from']
         current_state.track_bar_state.row = event['rows']
         current_state.message = f'Update track bar {current_state.track_bar_state.from_px} => {current_state.track_bar_state.to_px}, enabled = {current_state.track_bar_state.enabled}'
+    if _type == "bar":
+        current_state.bar_enabled = event['enabled']
+    if _type == "format":
+        current_state.is_hi_enabled = event['hi']
+        current_state.is_md_enabled = event['md']
+    if _type == "groups":
+        current_state.groups_icon_enabled = event['enabled']
+    if _type == "glyph":
+        current_state.current_playback_glyph = event['glyph']
+    if _type == "playmode":
+        current_state.play_modes = event['entries']
+    if _type == "limit":
+        for row in event['rows']:
+            current_state.screen_matrix[row].start = event['start']
+            current_state.screen_matrix[row].end = event['end']
     states.append(deepcopy(current_state))
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -233,7 +266,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_painter_color(painter)
 
         # Is this line there permanently?
-        painter.drawLine(0, TOP_RESERVED_PX, 128, TOP_RESERVED_PX)
+        # No
+        if state.bar_enabled:
+            painter.drawLine(0, TOP_RESERVED_PX, 128, TOP_RESERVED_PX)
         x, y = 0, TOP_RESERVED_PX
         font = QtGui.QFont()
         font.setFamily('monospace')

@@ -286,6 +286,11 @@ class Decoder(DecoderArchetype):
         format_info = data[1]
         is_hi = format_info & 2
         is_md = format_info & 1
+        self.transmit_to_emulator({
+            "type": "format",
+            "hi": is_hi,
+            "md": is_md
+        })
         self.put_command(f"Format icons: {is_hi=} {is_md}", f"{is_hi=} {is_md}", "Format", "FMT")
 
     @display_command_constlen(opcode = 0x13, length = 0x02)
@@ -293,13 +298,23 @@ class Decoder(DecoderArchetype):
         bitfield = data[1]
         is_charging = bitfield & (1 << 7)
         tiles = (bitfield & 0b11110) >> 1
-        tiles_str = ', '.join(str(x) for x in range(4) if bitfield & (1 << x))
+        tiles_str = ', '.join(str(x) for x in range(4) if tiles & (1 << x))
         outline = bitfield & 1
+        self.transmit_to_emulator({
+            "type": "battery",
+            "isCharging": is_charging,
+            "outlineEnabled": outline,
+            tiles: tiles
+        })
         self.put_command(f"Battery: {outline=} tiles={tiles_str}, {is_charging=}", "Battery")
 
     @display_command_constlen(opcode = 0x17, length = 0x02)
     def handle_command_17_groups(self, data):
         enabled = data[1]
+        self.transmit_to_emulator({
+            "type": "groups",
+            "enabled": enabled,
+        })
         self.put_command(f"Groups: {'On' if enabled else 'Off'}", "Groups", "GRP")
 
     @display_command_constlen(opcode = 0x18, length = 0x02)
@@ -307,12 +322,20 @@ class Decoder(DecoderArchetype):
         bitfield = ["REP", "1", "SHUF", "A->"]
         enabled_bitfield = data[1]
         entries = ', '.join(x for i, x in enumerate(bitfield) if enabled_bitfield & (1 << i))
+        self.transmit_to_emulator({
+            "type": "playmode",
+            "entries": entries
+        })
         self.put_command(f"Play mode: {entries}", "Play mode", "PM")
     
     @display_command_constlen(opcode = 0x1B, length = 0x02)
     def handle_command_1b_playglyph(self, data):
         glyph = data[1]
         glyphs = ["none", "stop", "play", "pause", "ff", "rev", "ffn", "revp"]
+        self.transmit_to_emulator({
+            "type": "glyph",
+            "glyph": glyphs[glyph]
+        })
         self.put_command(f"Display glyph: {glyphs[glyph]}", f"Glyph: {glyphs[glyph]}", glyphs[glyph])
     
     @display_command_constlen(opcode = 0x20, length = 0x02)
@@ -324,6 +347,10 @@ class Decoder(DecoderArchetype):
     @display_command_constlen(opcode = 0x23, length = 0x02)
     def handle_command_23_topbar(self, data):
         action = "Enable" if data[1] else "Disable"
+        self.transmit_to_emulator({
+            "type": "bar",
+            "enable": not not data[1]
+        })
         self.put_command(f"{action} bar at the top", f"{action[:2].upper()} bar")
 
     @display_command_constlen(opcode = 0x24, length = 0x02)
@@ -342,9 +369,15 @@ class Decoder(DecoderArchetype):
     @display_command_constlen(opcode = 0x53, length = 0x05)
     def handle_command_53_limit(self, data):
         rows = data[1]
-        rowsstr, _ = self.create_rows_string(rows)
+        rowsstr, rowslist = self.create_rows_string(rows)
         start = data[2]
         end = data[3]
+        self.transmit_to_emulator({
+            "type": "limit",
+            "start": start,
+            "end": end,
+            "rows": rowslist
+        })
         self.put_command(f"Limit text commands for {rowsstr} - start at {start}, end at {end}" f"Limit {rowsstr} - {start}:{end}", "Limit")
     
     @display_command_constlen(opcode = 0x54, length = 0x05)
